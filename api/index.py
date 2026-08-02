@@ -20,10 +20,13 @@ class handler(RequestHandler):
         routed_paths = [value for key, value in query_items if key == "__path"]
         remaining_query = [(key, value) for key, value in query_items if key != "__path"]
 
-        if routed_paths:
+        if routed_paths and routed_paths[-1]:
             public_path = "/" + urllib.parse.unquote(routed_paths[-1]).lstrip("/")
-        elif parsed.path in ("/api", "/api/index.py"):
-            # The root rewrite may omit an empty __path query parameter.
+        elif parsed.path.startswith("/api"):
+            # Any bare invocation of the function (/api, /api/index, /api/index.py,
+            # etc.) with no meaningful __path segment maps to the site root. Vercel
+            # strips the .py extension internally, so the exact string varies -
+            # match on prefix instead of an exact tuple of strings.
             public_path = "/"
         else:
             return
