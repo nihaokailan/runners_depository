@@ -1583,7 +1583,7 @@ def render_login(message=None, msg_type="success"):
         </form>
     </div>
     """
-    return get_base_html("Admin Login", content, "", show_admin_actions=False)
+    return get_base_html("Admin Login", content, "admin", show_admin_actions=False)
 
 
 def render_register(message=None, msg_type="success", form_data=None):
