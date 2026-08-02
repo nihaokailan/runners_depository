@@ -708,7 +708,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             color: var(--text);
             text-decoration: none;
             font-weight: 600;
-            background: #fffaf5;
+            background: rgba(255,255,255,0.92);
             border-radius: 18px;
             border: 1px solid transparent;
             transition: all 0.2s ease;
