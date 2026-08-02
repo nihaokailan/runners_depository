@@ -715,13 +715,13 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
         }}
         nav a:hover {{
             transform: translateX(2px);
-            background: rgba(214,90,0,0.10);
-            color: var(--primary);
+            background: #f4f4f4;
+            color: var(--text);
         }}
         nav a.active {{
             color: white;
-            background: var(--primary);
-            border-color: rgba(214,90,0,0.25);
+            background: #111111;
+            border-color: rgba(0,0,0,0.25);
             box-shadow: 0 14px 30px rgba(28,25,23,0.18);
         }}
         .sidebar-actions {{
