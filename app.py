@@ -613,7 +613,7 @@ def delete_runner(runner_id):
     return affected > 0
 
 # HTML Templates
-def get_base_html(title, content, active="dashboard", show_admin_actions=False):
+def get_base_html(title, content, active="", show_admin_actions=False):
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -708,7 +708,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             color: var(--text);
             text-decoration: none;
             font-weight: 600;
-            background: rgba(255,255,255,0.92);
+            background: #fffaf5;
             border-radius: 18px;
             border: 1px solid transparent;
             transition: all 0.2s ease;
@@ -1583,7 +1583,7 @@ def render_login(message=None, msg_type="success"):
         </form>
     </div>
     """
-    return get_base_html("Admin Login", content, "dashboard", show_admin_actions=False)
+    return get_base_html("Admin Login", content, "", show_admin_actions=False)
 
 
 def render_register(message=None, msg_type="success", form_data=None):
