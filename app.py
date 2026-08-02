@@ -11,7 +11,10 @@ import re
 import shutil
 import socketserver
 import sqlite3
+import sys
 import urllib.parse
+import urllib.request
+import urllib.error
 import csv
 import json
 import time
@@ -27,11 +30,16 @@ except ImportError:
 
 PORT = int(os.environ.get("PORT", 8000))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "runners.db")
+IS_VERCEL = os.environ.get("VERCEL") == "1"
+# Vercel Functions can write only to /tmp, and its contents are not durable.
+# Persistent deployments must use DATABASE_URL and BLOB_READ_WRITE_TOKEN.
+RUNTIME_DIR = os.path.join("/tmp", "marathon-runners-depository") if IS_VERCEL else BASE_DIR
+DB_PATH = os.path.join(RUNTIME_DIR, "runners.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+UPLOAD_DIR = os.path.join(RUNTIME_DIR, "uploads")
+BACKUP_DIR = os.path.join(RUNTIME_DIR, "backups")
+BLOB_READ_WRITE_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
 GOOGLE_SHEETS_ENABLED = os.environ.get("GOOGLE_SHEETS_ENABLED", "false").lower() in ("1", "true", "yes")
 GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")
 GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get("GOOGLE_SHEETS_CREDENTIALS_JSON", "")
@@ -84,6 +92,7 @@ def query_db(sql, params=(), fetchone=False, fetchall=False, commit=False):
 # Initialize database
 
 def init_db():
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     if USE_POSTGRES:
         try:
@@ -363,6 +372,45 @@ def save_receipt_file(field):
     return safe_name, ""
 
 
+def persist_receipt_file(filename):
+    """Store receipts in Vercel Blob when running as a Vercel Function.
+
+    Local development continues to serve files from the uploads directory. Vercel's
+    function filesystem is temporary, so a Blob token is required there instead.
+    """
+    if not IS_VERCEL:
+        return filename, ""
+    if not BLOB_READ_WRITE_TOKEN:
+        return None, "Receipt storage is not configured. Set BLOB_READ_WRITE_TOKEN in Vercel."
+
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    try:
+        with open(file_path, "rb") as receipt_file:
+            payload = receipt_file.read()
+        content_type = "image/png" if filename.lower().endswith(".png") else "image/jpeg"
+        request = urllib.request.Request(
+            f"https://blob.vercel-storage.com/receipts/{urllib.parse.quote(filename)}",
+            data=payload,
+            method="PUT",
+            headers={
+                "Authorization": f"Bearer {BLOB_READ_WRITE_TOKEN}",
+                "x-api-version": "7",
+                "x-add-random-suffix": "0",
+                "Content-Type": content_type,
+            },
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            blob = json.loads(response.read().decode("utf-8"))
+        return blob["url"], ""
+    except (OSError, urllib.error.URLError, KeyError, json.JSONDecodeError) as error:
+        return None, f"Could not save receipt to Vercel Blob: {error}"
+    finally:
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+
+
 def is_image_file(file_path):
     if Image:
         try:
@@ -574,32 +622,32 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
     <title>{title} - Marathon Runners Depository</title>
     <style>
         :root {{
-            --primary: #1f4e79;
-            --primary-soft: #2f6fb5;
-            --accent: #f4a261;
-            --success: #2a9d8f;
-            --danger: #e76f51;
-            --bg: #f4f6fb;
+            --primary: #1c1917;
+            --primary-soft: #d65a00;
+            --accent: #ff9f1c;
+            --success: #c2410c;
+            --danger: #b91c1c;
+            --bg: #fff7ed;
             --surface: #ffffff;
-            --text: #102a43;
-            --muted: #5c6f80;
-            --border: #d8e3ef;
-            --shadow: 0 18px 42px rgba(16, 42, 67, 0.08);
+            --text: #1c1917;
+            --muted: #57534e;
+            --border: #fed7aa;
+            --shadow: 0 18px 42px rgba(28, 25, 23, 0.12);
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
             font-family: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
-            background: radial-gradient(circle at top left, rgba(244,162,97,0.14), transparent 32%),
-                        linear-gradient(180deg, #f4f6fb 0%, #e9eff7 100%);
+            background: radial-gradient(circle at top left, rgba(255,159,28,0.22), transparent 32%),
+                        linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%);
             color: var(--text);
             line-height: 1.65;
             min-height: 100vh;
         }}
         header {{
-            background: linear-gradient(135deg, #1f4e79 0%, #2f6fb5 100%);
+            background: linear-gradient(135deg, #1c1917 0%, #3f2a1d 62%, #d65a00 150%);
             color: white;
             padding: 2rem 2rem 1.5rem;
-            box-shadow: 0 20px 60px rgba(31, 78, 121, 0.18);
+            box-shadow: 0 20px 60px rgba(28, 25, 23, 0.22);
         }}
         header h1 {{
             font-size: clamp(1.75rem, 2.5vw, 2.5rem);
@@ -621,7 +669,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
             gap: 1.5rem;
             max-width: 1400px;
-            margin: -1.5rem auto 2.5rem;
+            margin: 1.5rem auto 2.5rem;
             padding: 0 1.5rem 2rem;
         }}
         nav {{
@@ -632,7 +680,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
         }}
         .sidebar {{
             background: rgba(255,255,255,0.92);
-            border: 1px solid rgba(16,42,67,0.08);
+            border: 1px solid rgba(28,25,23,0.10);
             border-radius: 28px;
             box-shadow: var(--shadow);
             padding: 1.75rem;
@@ -660,21 +708,21 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             color: var(--text);
             text-decoration: none;
             font-weight: 600;
-            background: rgba(247,249,253,0.98);
+            background: #fffaf5;
             border-radius: 18px;
             border: 1px solid transparent;
             transition: all 0.2s ease;
         }}
         nav a:hover {{
             transform: translateX(2px);
-            background: rgba(47,111,181,0.08);
+            background: rgba(214,90,0,0.10);
             color: var(--primary);
         }}
         nav a.active {{
             color: white;
             background: var(--primary);
-            border-color: rgba(47,111,181,0.18);
-            box-shadow: 0 14px 30px rgba(31,78,121,0.14);
+            border-color: rgba(214,90,0,0.25);
+            box-shadow: 0 14px 30px rgba(28,25,23,0.18);
         }}
         .sidebar-actions {{
             display: grid;
@@ -697,7 +745,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             border-color: transparent;
         }}
         .sidebar-actions a.secondary-btn {{
-            background: #f5f7fb;
+            background: #fff7ed;
             color: var(--text);
         }}
         .sidebar-actions a:hover {{
@@ -710,6 +758,37 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             display: flex;
             flex-direction: column;
             gap: 1.5rem;
+        }}
+        .page-intro {{
+            padding: 0.4rem 0.25rem 0;
+        }}
+        .page-intro h2 {{
+            margin-bottom: 0.35rem;
+            font-size: clamp(1.55rem, 2.4vw, 2rem);
+            line-height: 1.2;
+        }}
+        .page-intro p {{ color: var(--muted); max-width: 680px; }}
+        .card-title-row {{
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 1.25rem;
+        }}
+        .card-title-row h2 {{ margin-bottom: 0.25rem; }}
+        .filter-form {{
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            align-items: end;
+        }}
+        .filter-field {{ flex: 1 1 260px; }}
+        .filter-field label {{ display: block; margin-bottom: 0.4rem; }}
+        .filter-field input, .filter-field select {{ width: 100%; }}
+        .results-meta {{
+            color: var(--muted);
+            font-size: 0.9rem;
+            margin-left: auto;
         }}
         @media (max-width: 960px) {{
             .page-layout {{
@@ -727,7 +806,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             box-shadow: var(--shadow);
             padding: 2rem;
             margin-bottom: 1.75rem;
-            border: 1px solid rgba(16,42,67,0.05);
+            border: 1px solid rgba(28,25,23,0.08);
         }}
         h2 {{
             font-size: 1.45rem;
@@ -736,6 +815,13 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             display: flex;
             align-items: center;
             gap: 0.65rem;
+            font-family: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
+            font-weight: 700;
+            font-style: normal;
+            letter-spacing: normal;
+            text-shadow: none;
+            -webkit-text-stroke: 0 transparent;
+            font-synthesis: none;
         }}
         .form-grid {{
             display: grid;
@@ -751,6 +837,9 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             gap: 0.45rem;
         }}
         .form-group.full {{ grid-column: 1 / -1; }}
+        .login-form {{
+            width: min(100%, 560px);
+        }}
         label {{
             font-size: 0.95rem;
             font-weight: 600;
@@ -762,14 +851,14 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             border-radius: 14px;
             font-size: 1rem;
             color: var(--text);
-            background: #fbfdff;
+            background: #fffdfa;
             transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }}
-        input:hover, select:hover {{ border-color: rgba(47,111,181,0.35); }}
+        input:hover, select:hover {{ border-color: rgba(214,90,0,0.55); }}
         input:focus, select:focus {{
             outline: none;
             border-color: var(--primary-soft);
-            box-shadow: 0 0 0 4px rgba(47,111,181,0.12);
+            box-shadow: 0 0 0 4px rgba(214,90,0,0.16);
         }}
         .btn {{
             display: inline-flex;
@@ -788,10 +877,10 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
         .btn-primary {{
             background: linear-gradient(135deg, var(--primary-soft), var(--accent));
             color: white;
-            box-shadow: 0 14px 30px rgba(47,111,181,0.18);
+            box-shadow: 0 14px 30px rgba(214,90,0,0.22);
         }}
         .btn-secondary {{
-            background: #f5f7fb;
+            background: #fff7ed;
             color: var(--text);
             border: 1px solid rgba(16,42,67,0.08);
         }}
@@ -808,8 +897,8 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             flex-wrap: wrap;
             align-items: center;
             gap: 0.65rem;
-            background: #f8fbff;
-            border: 1px dashed rgba(47,111,181,0.25);
+            background: #fffaf5;
+            border: 1px dashed rgba(214,90,0,0.38);
             border-radius: 16px;
             padding: 0.95rem 1rem;
         }}
@@ -838,19 +927,19 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
         .file-drop-zone {{
             position: relative;
             padding: 1.2rem;
-            border: 2px dashed rgba(47,111,181,0.45);
+            border: 2px dashed rgba(214,90,0,0.55);
             border-radius: 18px;
-            background: rgba(248,251,255,0.85);
+            background: rgba(255,250,245,0.92);
             cursor: pointer;
             transition: border-color 0.2s ease, background 0.2s ease;
         }}
         .file-drop-zone:hover {{
-            border-color: rgba(47,111,181,0.8);
-            background: rgba(241,247,255,1);
+            border-color: rgba(214,90,0,0.9);
+            background: #fff3e5;
         }}
         .file-drop-zone.active {{
             border-color: var(--primary-soft);
-            background: rgba(47,111,181,0.12);
+            background: rgba(214,90,0,0.14);
         }}
         .file-drop-zone input[type="file"] {{
             position: absolute;
@@ -892,9 +981,9 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             box-shadow: 0 10px 24px rgba(31,78,121,0.06);
         }}
         .alert-success {{
-            background: #e8f6f3;
+            background: #ffedd5;
             color: var(--success);
-            border: 1px solid rgba(42,157,143,0.18);
+            border: 1px solid rgba(194,65,12,0.24);
         }}
         .alert-error {{
             background: #ffe8e2;
@@ -908,23 +997,41 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             background: #ffffff;
             border-radius: 16px;
             overflow: hidden;
-            box-shadow: 0 12px 28px rgba(16,42,67,0.08);
+            box-shadow: 0 12px 28px rgba(28,25,23,0.08);
         }}
+        .table-scroll {{
+            max-height: 620px;
+            overflow: auto;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+        }}
+        .table-scroll table {{ border-radius: 0; box-shadow: none; }}
+        .table-scroll th {{ position: sticky; top: 0; z-index: 1; }}
+        .pagination {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-top: 1.25rem;
+        }}
+        .pagination-links {{ display: flex; gap: 0.6rem; flex-wrap: wrap; }}
+        .pagination-links a {{ text-decoration: none; }}
         th, td {{
             padding: 1rem 1.1rem;
             text-align: left;
-            border-bottom: 1px solid rgba(16,42,67,0.08);
+            border-bottom: 1px solid rgba(28,25,23,0.08);
         }}
         th {{
-            background: #f3f6fb;
+            background: #fff1df;
             font-weight: 700;
             color: var(--muted);
             font-size: 0.8rem;
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }}
-        tr:nth-child(even) td {{ background: #fbfcfe; }}
-        tr:hover td {{ background: #eef4fb; }}
+        tr:nth-child(even) td {{ background: #fffaf5; }}
+        tr:hover td {{ background: #ffedd5; }}
         .badge {{
             display: inline-flex;
             align-items: center;
@@ -932,7 +1039,7 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             border-radius: 999px;
             font-size: 0.8rem;
             font-weight: 600;
-            background: rgba(47,111,181,0.1);
+            background: rgba(214,90,0,0.12);
             color: var(--primary-soft);
         }}
         .stats {{
@@ -942,11 +1049,11 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
             margin-bottom: 1.75rem;
         }}
         .stat-card {{
-            background: #f8fbff;
+            background: #fffaf5;
             border-radius: 18px;
             padding: 1.45rem;
             text-align: center;
-            border: 1px solid rgba(47,111,181,0.1);
+            border: 1px solid rgba(214,90,0,0.16);
             transition: transform 0.2s ease;
         }}
         .stat-card:hover {{ transform: translateY(-2px); }}
@@ -974,6 +1081,13 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
         }}
         .name-cell {{ font-weight: 600; color: var(--text); }}
         .actions {{ white-space: nowrap; display: flex; gap: 0.5rem; flex-wrap: wrap; }}
+        @media (max-width: 600px) {{
+            header {{ padding: 1.5rem 1.25rem 1.25rem; }}
+            .page-layout {{ padding: 0 1rem 1.5rem; margin-top: 1rem; }}
+            .sidebar, .card {{ border-radius: 18px; padding: 1.25rem; }}
+            .results-meta {{ margin-left: 0; width: 100%; }}
+            th, td {{ padding: 0.8rem; }}
+        }}
     </style>
 </head>
 <body>
@@ -983,7 +1097,6 @@ def get_base_html(title, content, active="dashboard", show_admin_actions=False):
     <div class="page-layout">
         <aside class="sidebar">
             <h2>Navigation</h2>
-            <p>Quickly switch between public runner listings and admin management screens.</p>
             <nav>
                 <a href="/" class="{'active' if active == 'dashboard' else ''}">Public Runners</a>
                 <a href="/admin" class="{'active' if active == 'admin' else ''}">Admin Panel</a>
@@ -1051,10 +1164,22 @@ def render_public_runners(search_query=""):
     search_value = escape(search_query or "")
 
     search_panel = f"""
-    <div class="card" style="margin-bottom: 1.5rem;">
-        <form method="GET" action="/" style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
-            <label for="search" style="font-weight:600; margin-bottom:0;">Search runners</label>
-            <input id="search" name="search" type="search" placeholder="Search by name, email, or contact" value="{search_value}" style="flex:1; min-width:220px; padding:0.75rem; border:1px solid #ccc; border-radius:6px;">
+    <div class="page-intro">
+        <h2>Runner directory</h2>
+        <p>Browse the registered runners and celebrate the people in our community.</p>
+    </div>
+    <div class="card" style="margin-bottom: 0;">
+        <div class="card-title-row">
+            <div>
+                <h2>Find a runner</h2>
+                <p class="field-hint">Search by first name, middle name, or surname.</p>
+            </div>
+        </div>
+        <form method="GET" action="/" class="filter-form">
+            <div class="filter-field">
+                <label for="search">Runner name</label>
+                <input id="search" name="search" type="search" placeholder="e.g. Juan Dela Cruz" value="{search_value}">
+            </div>
             <button type="submit" class="btn btn-primary">Search</button>
             <a href="/" class="btn btn-secondary">Clear</a>
         </form>
@@ -1122,10 +1247,15 @@ def render_public_runners(search_query=""):
     return get_base_html("Public Runners", content, "dashboard")
 
 
-def render_admin_dashboard(message=None, msg_type="success", search_query="", payment_method="All", date_from="", date_to=""):
+def render_admin_dashboard(message=None, msg_type="success", search_query="", payment_method="All", date_from="", date_to="", page=1):
     runners = get_filtered_runners(search_query, payment_method, date_from, date_to)
     total = len(get_all_runners())
     filtered_total = len(runners)
+    page_size = 25
+    total_pages = max(1, (filtered_total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    page_start = (page - 1) * page_size
+    page_runners = runners[page_start:page_start + page_size]
     cashless = sum(1 for r in runners if r["payment_mode"].lower() == "cashless")
     pending = sum(1 for r in runners if r.get("receipt_verified", "Pending") == "Pending")
 
@@ -1158,6 +1288,12 @@ def render_admin_dashboard(message=None, msg_type="success", search_query="", pa
     payment_method_value = escape(payment_method or "All")
     date_from_value = escape(date_from or "")
     date_to_value = escape(date_to or "")
+    pagination_params = urllib.parse.urlencode({
+        "search": search_query,
+        "payment_method": payment_method,
+        "date_from": date_from,
+        "date_to": date_to,
+    })
     search_form = f"""
     <div class="card" style="margin-bottom: 1.5rem;">
         <form method="GET" action="/admin" style="display:grid; gap:0.75rem;">
@@ -1213,7 +1349,7 @@ def render_admin_dashboard(message=None, msg_type="success", search_query="", pa
         """
     else:
         rows = ""
-        for r in runners:
+        for r in page_runners:
             full_name = f"{escape(r['first_name'])} {escape(r['middle_name'] or '')} {escape(r['surname'])}".replace("  ", " ").strip()
             rows += f"""
             <tr>
@@ -1235,6 +1371,17 @@ def render_admin_dashboard(message=None, msg_type="success", search_query="", pa
                 </td>
             </tr>
             """
+        range_start = page_start + 1
+        range_end = min(page_start + page_size, filtered_total)
+        pagination = f"""
+            <div class="pagination">
+                <span class="field-hint">Showing registrations {range_start}&ndash;{range_end} of {filtered_total} &middot; Page {page} of {total_pages}</span>
+                <div class="pagination-links">
+                    {f'<a class="btn btn-secondary" href="/admin?{pagination_params}&page={page - 1}">Previous</a>' if page > 1 else ''}
+                    {f'<a class="btn btn-secondary" href="/admin?{pagination_params}&page={page + 1}">Next</a>' if page < total_pages else ''}
+                </div>
+            </div>
+        """ if total_pages > 1 else f'<div class="pagination"><span class="field-hint">Showing all {filtered_total} registrations</span></div>'
         table = f"""
         <div class="card" style="margin-bottom: 1.5rem;">
             <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
@@ -1247,7 +1394,7 @@ def render_admin_dashboard(message=None, msg_type="success", search_query="", pa
         </div>
         <div class="card">
             <h2>📋 Admin Runner Management</h2>
-            <div style="overflow-x:auto;">
+            <div class="table-scroll">
                 <table>
                     <thead>
                         <tr>
@@ -1268,10 +1415,17 @@ def render_admin_dashboard(message=None, msg_type="success", search_query="", pa
                     </tbody>
                 </table>
             </div>
+            {pagination}
         </div>
         """
 
-    content = alert + stats + search_form + table
+    intro = """
+    <div class="page-intro">
+        <h2>Runner management</h2>
+        <p>Review registrations, verify payments, and keep the event roster up to date.</p>
+    </div>
+    """
+    content = alert + intro + stats + search_form + table
     return get_base_html("Admin Panel", content, "admin", show_admin_actions=True)
 
 def render_runner_form(title, form_data=None, message=None, msg_type="success", submit_label="Register Runner", runner_id=None, active="register"):
@@ -1287,12 +1441,15 @@ def render_runner_form(title, form_data=None, message=None, msg_type="success", 
     receipt_required = "required" if not receipt_filename else ""
     receipt_preview = ""
     if receipt_filename:
+        is_remote_receipt = receipt_filename.startswith(("https://", "http://"))
         safe_name = escape(receipt_filename)
+        receipt_url = safe_name if is_remote_receipt else f"/uploads/{safe_name}"
+        receipt_label = escape(os.path.basename(urllib.parse.urlparse(receipt_filename).path))
         scan_note = f"<p class=\"field-hint\">{escape(receipt_scan_message)}</p>" if receipt_scan_message else ""
         receipt_preview = f"""
             <div class=\"receipt-preview\">
                 <span class=\"preview-label\">Receipt Uploaded:</span>
-                <a href=\"/uploads/{safe_name}\" target=\"_blank\">{safe_name}</a>
+                <a href=\"{receipt_url}\" target=\"_blank\" rel=\"noopener\">{receipt_label}</a>
                 <span class=\"badge badge-status\">{escape(receipt_verified)}</span>
                 {scan_note}
             </div>
@@ -1411,7 +1568,7 @@ def render_login(message=None, msg_type="success"):
     {alert}
     <div class="card">
         <h2>🔐 Admin Login</h2>
-        <form method="POST" action="/login">
+        <form method="POST" action="/login" class="login-form">
             <div class="form-group">
                 <label for="username">Username</label>
                 <input type="text" id="username" name="username" required placeholder="admin">
@@ -1519,10 +1676,14 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             payment_method = query.get("payment_method", ["All"])[0]
             date_from = query.get("date_from", [""])[0]
             date_to = query.get("date_to", [""])[0]
+            try:
+                page = max(1, int(query.get("page", ["1"])[0]))
+            except ValueError:
+                page = 1
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(render_admin_dashboard(message, msg_type, search_query, payment_method, date_from, date_to).encode("utf-8"))
+            self.wfile.write(render_admin_dashboard(message, msg_type, search_query, payment_method, date_from, date_to, page).encode("utf-8"))
         elif path == "/edit":
             runner_id = query.get("id", [None])[0]
             runner = get_runner_by_id(int(runner_id)) if runner_id and runner_id.isdigit() else None
@@ -1712,7 +1873,23 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(html.encode("utf-8"))
                     return
-                data["receipt_filename"] = receipt_filename
+                stored_receipt, storage_error = persist_receipt_file(receipt_filename)
+                if storage_error:
+                    html = render_runner_form(
+                        "Edit Runner Details" if self.path == "/edit" else "Register New Runner",
+                        data,
+                        message=storage_error,
+                        msg_type="error",
+                        submit_label="Save Changes" if self.path == "/edit" else "Register Runner",
+                        runner_id=data.get("id") if self.path == "/edit" else None,
+                        active="admin"
+                    )
+                    self.send_response(500)
+                    self.send_header("Content-type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(html.encode("utf-8"))
+                    return
+                data["receipt_filename"] = stored_receipt
                 data["receipt_verified"] = status
                 data["receipt_scan_message"] = scan_message
             elif self.path == "/edit" and data.get("id"):
@@ -1787,6 +1964,9 @@ def main():
     if httpd is None:
         raise RuntimeError(f"Unable to bind to any port in range {PORT}-{PORT + 9}")
 
+    # Windows consoles may default to cp1252, which cannot render the banner.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║     Marathon Runners Depository Application              ║
