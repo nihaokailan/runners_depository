@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: marathon-runners-depository
+    env: python
+    plan: free
+    branch: main
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: DATABASE_URL
+        value: ""
+      - key: GOOGLE_SHEETS_ENABLED
+        value: "false"
+      - key: GOOGLE_SHEETS_SPREADSHEET_ID
+        value: ""
+      - key: GOOGLE_SHEETS_CREDENTIALS_JSON
+        value: ""
