@@ -1098,7 +1098,7 @@ def get_base_html(title, content, active="", show_admin_actions=False):
         <aside class="sidebar">
             <h2>Navigation</h2>
             <nav>
-                <a href="/" class="{'active' if active == 'dashboard' else ''}">Public Runners</a>
+                <a href="/{'?active=admin' if show_admin_actions else ''}" class="{'active' if active == 'dashboard' else ''}">Public Runners</a>
                 <a href="/admin" class="{'active' if active == 'admin' else ''}">Admin Panel</a>
             </nav>
             <div class="sidebar-actions">
@@ -1159,7 +1159,7 @@ def get_base_html(title, content, active="", show_admin_actions=False):
 </html>
 """
 
-def render_public_runners(search_query=""):
+def render_public_runners(search_query="", show_admin_actions=False, active="dashboard"):
     runners = get_filtered_runners(search_query)
     search_value = escape(search_query or "")
 
@@ -1207,7 +1207,7 @@ def render_public_runners(search_query=""):
                 </div>
             </div>
             """
-        return get_base_html("Public Runners", search_panel + content, "dashboard")
+        return get_base_html("Public Runners", search_panel + content, active, show_admin_actions=show_admin_actions)
 
     rows = ""
     for r in runners:
@@ -1244,7 +1244,7 @@ def render_public_runners(search_query=""):
         </div>
     </div>
     """
-    return get_base_html("Public Runners", content, "dashboard")
+    return get_base_html("Public Runners", content, active, show_admin_actions=show_admin_actions)
 
 
 def render_admin_dashboard(message=None, msg_type="success", search_query="", payment_method="All", date_from="", date_to="", page=1):
@@ -1646,10 +1646,15 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/" or path == "/dashboard":
+            active = query.get("active", [""])[0]
+            if self.is_admin_authenticated():
+                active = active or "admin"
+            else:
+                active = "dashboard"
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(render_public_runners(query.get("search", [""])[0]).encode("utf-8"))
+            self.wfile.write(render_public_runners(query.get("search", [""])[0], show_admin_actions=self.is_admin_authenticated(), active=active).encode("utf-8"))
         elif path == "/register":
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
