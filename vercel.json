@@ -1,16 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index.py?__path=/$1"
+      "src": "api/index.py",
+      "use": "@vercel/python"
     }
   ],
-  "functions": {
-    "api/index.py": {
-      "runtime": "python3.12",
-      "maxDuration": 30,
-      "excludeFiles": "{backups/**,uploads/**,__pycache__/**,client_test.py,parser_test.py}"
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.py?__path=/$1"
     }
-  }
+  ]
 }
