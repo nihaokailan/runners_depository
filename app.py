@@ -9,6 +9,7 @@ import http.server
 import os
 import re
 import shutil
+import smtplib
 import socketserver
 import sqlite3
 import sys
@@ -20,6 +21,7 @@ import json
 import time
 import uuid
 from datetime import datetime
+from email.message import EmailMessage
 from html import escape
 
 try:
@@ -43,6 +45,13 @@ BLOB_READ_WRITE_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
 GOOGLE_SHEETS_ENABLED = os.environ.get("GOOGLE_SHEETS_ENABLED", "false").lower() in ("1", "true", "yes")
 GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")
 GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get("GOOGLE_SHEETS_CREDENTIALS_JSON", "")
+SMTP_HOST = os.environ.get("SMTP_HOST", "localhost").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587").strip() or "587")
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes")
+SMTP_FROM = os.environ.get("SMTP_FROM", "noreply@example.com").strip()
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Marathon Runners Depository").strip()
 
 
 def connect_db():
@@ -109,7 +118,7 @@ def init_db():
                     email TEXT NOT NULL,
                     contact_number TEXT NOT NULL,
                     shirt_size TEXT NOT NULL DEFAULT 'M',
-                    years_running INTEGER NOT NULL DEFAULT 0,
+                    team_group TEXT NOT NULL DEFAULT 'N/A',
                     receipt_filename TEXT,
                     receipt_verified TEXT DEFAULT 'Pending',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -142,8 +151,8 @@ def init_db():
         existing_columns = [row[1] for row in cursor.fetchall()]
         if "shirt_size" not in existing_columns:
             cursor.execute("ALTER TABLE runners ADD COLUMN shirt_size TEXT DEFAULT 'M'")
-        if "years_running" not in existing_columns:
-            cursor.execute("ALTER TABLE runners ADD COLUMN years_running INTEGER DEFAULT 0")
+        if "team_group" not in existing_columns:
+            cursor.execute("ALTER TABLE runners ADD COLUMN team_group TEXT DEFAULT 'N/A'")
         if "receipt_filename" not in existing_columns:
             cursor.execute("ALTER TABLE runners ADD COLUMN receipt_filename TEXT")
         if "receipt_verified" not in existing_columns:
@@ -206,7 +215,7 @@ def backup_runners_to_csv(runners):
     backup_path = get_backup_filename()
     fieldnames = [
         "id", "first_name", "middle_name", "surname", "payment_mode", "payment_date",
-        "email", "contact_number", "shirt_size", "years_running", "receipt_filename",
+        "email", "contact_number", "shirt_size", "team_group", "receipt_filename",
         "receipt_verified", "created_at"
     ]
     with open(backup_path, "w", newline="", encoding="utf-8") as csv_file:
@@ -299,6 +308,47 @@ def sanitize_filename(filename):
 def is_valid_email(email):
     return bool(re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email))
 
+VERIFIED_RECEIPT_STATUSES = {"verified", "approved", "confirmed", "registered"}
+
+
+def send_registration_confirmation_email(runner):
+    email_address = (runner.get("email") or "").strip().lower()
+    if not email_address or not is_valid_email(email_address):
+        return False, "No valid recipient email available"
+
+    full_name = " ".join(
+        part for part in [runner.get("first_name", ""), runner.get("middle_name", ""), runner.get("surname", "")]
+        if part
+    ).strip()
+    subject = "You are now registered as a marathon runner"
+    body = f"""Hello {full_name or 'runner'},
+
+Your payment has been verified and you are now registered as a runner for the event.
+
+Please keep this email as confirmation of your registration.
+
+Thank you,
+{SMTP_FROM_NAME}
+"""
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM}>" if SMTP_FROM_NAME else SMTP_FROM
+    message["To"] = email_address
+    message.set_content(body)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            if SMTP_USERNAME and SMTP_PASSWORD:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+        return True, "Confirmation email sent"
+    except Exception as exc:
+        return False, f"Email sending failed: {exc}"
+
+
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 SESSION_COOKIE_NAME = "admin_session"
@@ -377,13 +427,16 @@ def persist_receipt_file(filename):
 
     Local development continues to serve files from the uploads directory. Vercel's
     function filesystem is temporary, so a Blob token is required there instead.
+    If blob storage is unavailable or not configured, the app falls back to the
+    local uploads directory so registration can still proceed.
     """
-    if not IS_VERCEL:
-        return filename, ""
-    if not BLOB_READ_WRITE_TOKEN:
-        return None, "Receipt storage is not configured. Set BLOB_READ_WRITE_TOKEN in Vercel."
-
     file_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.isfile(file_path):
+        return None, "Receipt file could not be found"
+
+    if not IS_VERCEL or not BLOB_READ_WRITE_TOKEN:
+        return filename, ""
+
     try:
         with open(file_path, "rb") as receipt_file:
             payload = receipt_file.read()
@@ -514,7 +567,7 @@ def update_runner(runner_id, data):
     query_db(
         """
         UPDATE runners
-        SET first_name = ?, middle_name = ?, surname = ?, payment_mode = ?, payment_date = ?, email = ?, contact_number = ?, shirt_size = ?, years_running = ?, receipt_filename = ?, receipt_verified = ?
+        SET first_name = ?, middle_name = ?, surname = ?, payment_mode = ?, payment_date = ?, email = ?, contact_number = ?, shirt_size = ?, team_group = ?, receipt_filename = ?, receipt_verified = ?
         WHERE id = ?
         """,
         (
@@ -526,7 +579,7 @@ def update_runner(runner_id, data):
             data.get("email", "").strip(),
             data.get("contact_number", "").strip(),
             data.get("shirt_size", "M").strip(),
-            int(data.get("years_running", 0)),
+            data.get("team_group", "N/A").strip(),
             data.get("receipt_filename"),
             data.get("receipt_verified", "Pending"),
             runner_id,
@@ -567,7 +620,7 @@ def add_runner(data):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO runners (first_name, middle_name, surname, payment_mode, payment_date, email, contact_number, shirt_size, years_running, receipt_filename, receipt_verified)
+            INSERT INTO runners (first_name, middle_name, surname, payment_mode, payment_date, email, contact_number, shirt_size, team_group, receipt_filename, receipt_verified)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data.get("first_name", "").strip(),
@@ -578,7 +631,7 @@ def add_runner(data):
             data.get("email", "").strip(),
             data.get("contact_number", "").strip(),
             data.get("shirt_size", "M").strip(),
-            int(data.get("years_running", 0)),
+            data.get("team_group", "N/A").strip(),
             data.get("receipt_filename"),
             data.get("receipt_verified", "Pending"),
         ))
@@ -840,16 +893,28 @@ def get_base_html(title, content, active="", show_admin_actions=False):
         .login-form {{
             width: min(100%, 560px);
         }}
+        .form-group select {{
+            appearance: none;
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            background-image: linear-gradient(45deg, transparent 50%, var(--text) 50%),
+                              linear-gradient(135deg, var(--text) 50%, transparent 50%),
+                              radial-gradient(circle at right 1.1rem center, rgba(0,0,0,0.15) 0.06rem, transparent 0.08rem);
+            background-position: calc(100% - 1rem) calc(50% - 0.15rem), calc(100% - 0.75rem) calc(50% - 0.15rem), 100% 50%;
+            background-size: 0.5rem 0.5rem, 0.5rem 0.5rem, 0.85rem 0.85rem;
+            background-repeat: no-repeat;
+            padding-right: 2.2rem;
+        }}
         label {{
             font-size: 0.95rem;
             font-weight: 600;
             color: var(--muted);
         }}
         input, select {{
-            padding: 0.95rem 1rem;
+            padding: 0.85rem 0.95rem;
             border: 1px solid var(--border);
-            border-radius: 14px;
-            font-size: 1rem;
+            border-radius: 12px;
+            font-size: 0.97rem;
             color: var(--text);
             background: #fffdfa;
             transition: border-color 0.2s ease, box-shadow 0.2s ease;
@@ -895,12 +960,37 @@ def get_base_html(title, content, active="", show_admin_actions=False):
             margin-top: 0.9rem;
             display: flex;
             flex-wrap: wrap;
-            align-items: center;
-            gap: 0.65rem;
+            align-items: flex-start;
+            gap: 0.9rem;
             background: #fffaf5;
             border: 1px dashed rgba(214,90,0,0.38);
             border-radius: 16px;
             padding: 0.95rem 1rem;
+        }}
+        .receipt-preview-image-shell {{
+            flex: 0 0 220px;
+            max-width: 100%;
+            border-radius: 14px;
+            overflow: hidden;
+            background: #fff;
+            border: 1px solid rgba(16,42,67,0.08);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 140px;
+        }}
+        .receipt-preview-image {{
+            display: block;
+            width: 100%;
+            max-height: 260px;
+            object-fit: contain;
+            background: #fff;
+        }}
+        .receipt-preview-meta {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            min-width: 0;
         }}
         .preview-label {{
             font-size: 0.92rem;
@@ -1120,6 +1210,28 @@ def get_base_html(title, content, active="", show_admin_actions=False):
             const dropZone = document.getElementById('receipt-drop-zone');
             const fileInput = document.getElementById('receipt');
             const fileName = document.getElementById('receipt-file-name');
+            const previewWrapper = document.getElementById('receipt-preview-wrapper');
+            const previewImage = document.getElementById('receipt-preview-image');
+            const previewLink = document.getElementById('receipt-preview-link');
+            let previewObjectUrl = null;
+
+            const clearPreview = () => {{
+                if (previewImage) {{
+                    previewImage.removeAttribute('src');
+                    previewImage.alt = 'Receipt preview';
+                }}
+                if (previewLink) {{
+                    previewLink.removeAttribute('href');
+                    previewLink.textContent = '';
+                }}
+                if (previewWrapper) {{
+                    previewWrapper.style.display = 'none';
+                }}
+                if (previewObjectUrl) {{
+                    URL.revokeObjectURL(previewObjectUrl);
+                    previewObjectUrl = null;
+                }}
+            }};
 
             const updateFileName = () => {{
                 if (fileInput.files.length > 0) {{
@@ -1129,8 +1241,34 @@ def get_base_html(title, content, active="", show_admin_actions=False):
                 }}
             }};
 
+            const updatePreview = (file) => {{
+                if (!previewWrapper || !previewImage || !previewLink) {{
+                    return;
+                }}
+
+                if (!file) {{
+                    clearPreview();
+                    return;
+                }}
+
+                if (previewObjectUrl) {{
+                    URL.revokeObjectURL(previewObjectUrl);
+                }}
+
+                previewObjectUrl = URL.createObjectURL(file);
+                previewImage.src = previewObjectUrl;
+                previewImage.alt = `Preview of ${{file.name}}`;
+                previewLink.href = previewObjectUrl;
+                previewLink.textContent = file.name;
+                previewWrapper.style.display = 'flex';
+            }};
+
             if (dropZone && fileInput && fileName) {{
-                fileInput.addEventListener('change', updateFileName);
+                fileInput.addEventListener('change', function () {{
+                    updateFileName();
+                    const selectedFile = fileInput.files.length > 0 ? fileInput.files[0] : null;
+                    updatePreview(selectedFile);
+                }});
 
                 dropZone.addEventListener('dragover', function (event) {{
                     event.preventDefault();
@@ -1149,9 +1287,13 @@ def get_base_html(title, content, active="", show_admin_actions=False):
                         }}
                         fileInput.files = dataTransfer.files;
                         updateFileName();
+                        updatePreview(fileInput.files.length > 0 ? fileInput.files[0] : null);
                     }}
                 }});
                 updateFileName();
+                if (fileInput.files.length > 0) {{
+                    updatePreview(fileInput.files[0]);
+                }}
             }}
         }});
     </script>
@@ -1212,14 +1354,12 @@ def render_public_runners(search_query="", show_admin_actions=False, active="das
     rows = ""
     for r in runners:
         full_name = f"{escape(r['first_name'])} {escape(r['middle_name'] or '')} {escape(r['surname'])}".replace("  ", " ").strip()
-        years = int(r.get('years_running', 0))
-        milestone = "3peat" if years >= 3 and years < 5 else "Hall of Fame" if years >= 5 else ""
+        team_group = escape(r.get('team_group', 'N/A'))
         rows += f"""
             <tr>
                 <td>{escape(full_name)}</td>
                 <td>{escape(r.get('shirt_size', 'M'))}</td>
-                <td>{years}</td>
-                <td>{milestone}</td>
+                <td>{team_group}</td>
             </tr>
         """
 
@@ -1356,7 +1496,7 @@ def render_admin_dashboard(message=None, msg_type="success", search_query="", pa
                 <td>{r['id']}</td>
                 <td class="name-cell">{full_name}</td>
                 <td>{escape(r.get('shirt_size', 'M'))}</td>
-                <td>{escape(str(r.get('years_running', 0)))}</td>
+                <td>{escape(r.get('team_group', 'N/A'))}</td>
                 <td><span class="badge">{escape(r['payment_mode'])}</span></td>
                 <td>{escape(r['payment_date'])}</td>
                 <td>{escape(r['email'])}</td>
@@ -1447,11 +1587,29 @@ def render_runner_form(title, form_data=None, message=None, msg_type="success", 
         receipt_label = escape(os.path.basename(urllib.parse.urlparse(receipt_filename).path))
         scan_note = f"<p class=\"field-hint\">{escape(receipt_scan_message)}</p>" if receipt_scan_message else ""
         receipt_preview = f"""
-            <div class=\"receipt-preview\">
-                <span class=\"preview-label\">Receipt Uploaded:</span>
-                <a href=\"{receipt_url}\" target=\"_blank\" rel=\"noopener\">{receipt_label}</a>
-                <span class=\"badge badge-status\">{escape(receipt_verified)}</span>
-                {scan_note}
+            <div class=\"receipt-preview\" id=\"receipt-preview-wrapper\">
+                <div class=\"receipt-preview-image-shell\">
+                    <img id=\"receipt-preview-image\" class=\"receipt-preview-image\" src=\"{receipt_url}\" alt=\"Receipt preview\">
+                </div>
+                <div class=\"receipt-preview-meta\">
+                    <span class=\"preview-label\">Receipt Uploaded:</span>
+                    <a id=\"receipt-preview-link\" href=\"{receipt_url}\" target=\"_blank\" rel=\"noopener\">{receipt_label}</a>
+                    <span class=\"badge badge-status\">{escape(receipt_verified)}</span>
+                    {scan_note}
+                </div>
+            </div>
+        """
+    else:
+        receipt_preview = """
+            <div class=\"receipt-preview\" id=\"receipt-preview-wrapper\" style=\"display:none;\">
+                <div class=\"receipt-preview-image-shell\">
+                    <img id=\"receipt-preview-image\" class=\"receipt-preview-image\" src=\"\" alt=\"Receipt preview\">
+                </div>
+                <div class=\"receipt-preview-meta\">
+                    <span class=\"preview-label\">Receipt Uploaded:</span>
+                    <a id=\"receipt-preview-link\" href=\"#\" target=\"_blank\" rel=\"noopener\"></a>
+                    <span class=\"badge badge-status\">Pending</span>
+                </div>
             </div>
         """
 
@@ -1510,10 +1668,10 @@ def render_runner_form(title, form_data=None, message=None, msg_type="success", 
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="years_running">Years with Organization *</label>
-                    <input type="number" id="years_running" name="years_running" required min="0" max="50"
-                           value="{escape(str(form_data.get('years_running', 0)))}"
-                           placeholder="e.g. 3">
+                    <label for="team_group">Your team or N/A *</label>
+                    <input type="text" id="team_group" name="team_group" required
+                           value="{escape(form_data.get('team_group', ''))}"
+                           placeholder="e.g. Fast Feet or N/A">
                 </div>
                 <div class="form-group">
                     <label for="email">Email Address *</label>
@@ -1548,6 +1706,16 @@ def render_runner_form(title, form_data=None, message=None, msg_type="success", 
                     <p class="field-hint required-hint">This proof is required for registration and cannot be submitted without a receipt image.</p>
                     <p class="field-hint">Upload a screenshot or receipt image for GCash, Maya, bank transfer, or other online payment.</p>
                     {receipt_preview}
+                </div>
+                <div class="form-group full">
+                    <label for="receipt_verified">Payment Verification Status</label>
+                    <select id="receipt_verified" name="receipt_verified">
+                        <option value="Pending" {"selected" if form_data.get("receipt_verified", "Ready for Review") == "Pending" else ""}>Pending</option>
+                        <option value="Ready for Review" {"selected" if form_data.get("receipt_verified", "Ready for Review") == "Ready for Review" else ""}>Ready for Review</option>
+                        <option value="Verified" {"selected" if form_data.get("receipt_verified", "Ready for Review") == "Verified" else ""}>Verified</option>
+                        <option value="Invalid" {"selected" if form_data.get("receipt_verified", "Ready for Review") == "Invalid" else ""}>Invalid</option>
+                    </select>
+                    <p class="field-hint">Set this to Verified to send the registrant a confirmation email.</p>
                 </div>
             </div>
             <div style="margin-top: 1.5rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
@@ -1744,7 +1912,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             fields = {k: v[0] if v else "" for k, v in params.items()}
 
         data = {}
-        for field in ["id", "first_name", "middle_name", "surname", "payment_mode", "payment_date", "email", "contact_number", "shirt_size", "years_running", "receipt_verified", "username", "password"]:
+        for field in ["id", "first_name", "middle_name", "surname", "payment_mode", "payment_date", "email", "contact_number", "shirt_size", "team_group", "receipt_verified", "username", "password"]:
             if field in fields:
                 data[field] = fields[field]
 
@@ -1771,7 +1939,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/register" or self.path == "/edit":
-            required = ["first_name", "surname", "payment_mode", "payment_date", "email", "contact_number", "shirt_size", "years_running"]
+            required = ["first_name", "surname", "payment_mode", "payment_date", "email", "contact_number", "shirt_size", "team_group"]
             missing = [f for f in required if not data.get(f, "").strip()]
             if missing:
                 html = render_runner_form(
@@ -1900,8 +2068,12 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(html.encode("utf-8"))
                     return
                 data["receipt_filename"] = stored_receipt
-                data["receipt_verified"] = status
                 data["receipt_scan_message"] = scan_message
+                selected_status = data.get("receipt_verified", "").strip()
+                if selected_status in {"Pending", "Ready for Review", "Verified", "Invalid"}:
+                    data["receipt_verified"] = selected_status
+                else:
+                    data["receipt_verified"] = status
             elif self.path == "/edit" and data.get("id"):
                 existing = get_runner_by_id(int(data.get("id")))
                 if existing:
@@ -1913,13 +2085,19 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             try:
                 if self.path == "/register":
                     runner_id = add_runner(data)
+                    if data.get("receipt_verified", "").strip().lower() in VERIFIED_RECEIPT_STATUSES:
+                        send_registration_confirmation_email(data)
                     self.send_response(303)
                     self.send_header("Location", f"/admin?success=1&id={runner_id}")
                     self.end_headers()
                     return
                 if self.path == "/edit":
                     runner_id = data.get("id")
+                    existing_runner = get_runner_by_id(int(runner_id)) if runner_id else None
+                    previous_status = (existing_runner or {}).get("receipt_verified", "") if existing_runner else ""
                     update_runner(int(runner_id), data)
+                    if previous_status.strip().lower() not in VERIFIED_RECEIPT_STATUSES and data.get("receipt_verified", "").strip().lower() in VERIFIED_RECEIPT_STATUSES:
+                        send_registration_confirmation_email(data)
                     self.send_response(303)
                     self.send_header("Location", "/admin?updated=1")
                     self.end_headers()
