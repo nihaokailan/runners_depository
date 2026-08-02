@@ -1560,7 +1560,7 @@ def render_runner_form(title, form_data=None, message=None, msg_type="success", 
     return get_base_html(title, content, active, show_admin_actions=True)
 
 
-def render_login(message=None, msg_type="success"):
+def render_login(message=None, msg_type="success", active=""):
     alert = ''
     if message:
         alert = f'<div class="alert alert-{msg_type}">{escape(message)}</div>'
@@ -1583,7 +1583,7 @@ def render_login(message=None, msg_type="success"):
         </form>
     </div>
     """
-    return get_base_html("Admin Login", content, "admin", show_admin_actions=False)
+    return get_base_html("Admin Login", content, active, show_admin_actions=False)
 
 
 def render_register(message=None, msg_type="success", form_data=None):
@@ -1612,9 +1612,12 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     def is_admin_authenticated(self):
         return verify_admin_session(self.get_session_id())
 
-    def redirect_to_login(self):
+    def redirect_to_login(self, active=""):
+        location = "/login"
+        if active:
+            location += f"?active={urllib.parse.quote(active)}"
         self.send_response(303)
-        self.send_header("Location", "/login")
+        self.send_header("Location", location)
         self.end_headers()
 
     def do_GET(self):
@@ -1623,10 +1626,11 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         if path == "/login":
+            active = query.get("active", [""])[0]
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(render_login().encode("utf-8"))
+            self.wfile.write(render_login(active=active).encode("utf-8"))
             return
 
         if path == "/logout":
@@ -1637,7 +1641,8 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path in ["/admin", "/register", "/edit"] and not self.is_admin_authenticated():
-            self.redirect_to_login()
+            active = "admin" if path == "/admin" else ""
+            self.redirect_to_login(active=active)
             return
 
         if path == "/" or path == "/dashboard":
